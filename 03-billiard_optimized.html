@@ -1,0 +1,534 @@
+<!--
+Copyright 2021 Matthias Müller - Ten Minute Physics
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+-->
+<!-- A simple demo to showcase how collision detection can be optimized using spatial hashing in 2D 
+	 Demo by Muhammad Mobeen Movania based on the 3rd tutorial (Billiards) on TenMinutePhysics by the guru Matthias Müller
+-->
+<!DOCTYPE html>
+<html>
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+	<head>
+		<title>Billiard</title>
+		<style>
+			body {
+				font-family: verdana; 
+				font-size: 15px;
+				overflow:hidden;
+			}			
+			.button {
+				background-color: #606060;
+				border: none;
+				color: white;
+				padding: 10px 32px;
+				font-size: 16px;
+				margin: 4px 2px;
+				cursor: pointer;
+			}
+			.slider {
+				-webkit-appearance: none;
+				width: 80px;
+				height: 6px;
+				border-radius: 5px;
+				background: #d3d3d3;
+				outline: none;
+				opacity: 0.7;
+				-webkit-transition: .2s;
+				transition: opacity .2s;
+			}
+		</style>
+	</head>
+	
+<body>
+ 
+	<input  type = "checkbox" onclick = "onUseSpatialHashing()" >Use spatial hashing</p>	 
+	<canvas id="myCanvas" style="border:2px solid"></canvas>
+	<script src="https://unpkg.com/three@0.147.0/examples/js/libs/stats.min.js"></script>
+
+<script>
+
+	// drawing -------------------------------------------------------
+
+	var canvas = document.getElementById("myCanvas");
+	var c = canvas.getContext("2d");
+
+	canvas.width = window.innerWidth - 20;
+	canvas.height = window.innerHeight - 100;
+
+	var simMinWidth = 2.0;
+	var cScale = Math.min(canvas.width, canvas.height) / simMinWidth;
+	var simWidth = canvas.width / cScale;
+	var simHeight = canvas.height / cScale;
+	var stats1, stats2;
+
+	function cX(pos_x) {
+		return pos_x * cScale;
+	}
+
+	function cY(pos_y) {
+		return canvas.height - pos_y * cScale;
+	}
+
+	function onUseSpatialHashing() {
+		physicsScene.useSpatialHashing = !physicsScene.useSpatialHashing;
+	}
+
+	// vector math -------------------------------------------------------
+
+	class Vector2 {
+		constructor(x = 0.0, y = 0.0) {
+			this.x = x; 
+			this.y = y;
+		}
+
+		set(v) {
+			this.x = v.x; this.y = v.y;
+		}
+
+		clone() {
+			return new Vector2(this.x, this.y);
+		}
+
+		add(v, s = 1.0) {
+			this.x += v.x * s;
+			this.y += v.y * s;
+			return this;
+		}
+
+		addVectors(a, b) {
+			this.x = a.x + b.x;
+			this.y = a.y + b.y;
+			return this;
+		}
+
+		subtract(v, s = 1.0) {
+			this.x -= v.x * s;
+			this.y -= v.y * s;
+			return this;
+		}
+
+		subtractVectors(a, b) {
+			this.x = a.x - b.x;
+			this.y = a.y - b.y;
+			return this;			
+		}
+
+		length() {
+			return Math.sqrt(this.x * this.x + this.y * this.y);
+		}
+
+		scale(s) {
+			this.x *= s;
+			this.y *= s;
+		}
+
+		dot(v) {
+			return this.x * v.x + this.y * v.y;
+		}
+	}
+
+	// ----- math on vector arrays -------------------------------------------------------------
+
+	function vecScale(a,anr, scale) 
+	{
+		anr *= 2;
+		a[anr++] *= scale;
+		a[anr] *= scale;
+	}
+
+	function vecCopy(a,anr, b,bnr) 
+	{
+		anr *= 2; bnr *= 2;
+		a[anr++] = b[bnr++]; 
+		a[anr] = b[bnr]; 
+	}
+			
+	function vecAdd(a,anr, b,bnr, scale = 1.0) 
+	{
+		anr *= 2; bnr *= 2;
+		a[anr++] += b[bnr++] * scale; 
+		a[anr] += b[bnr] * scale; 
+	}
+
+	function vecSetDiff(dst,dnr, a,anr, b,bnr, scale = 1.0) 
+	{
+		dnr *= 2; anr *= 2; bnr *= 2;
+		dst[dnr++] = (a[anr++] - b[bnr++]) * scale;
+		dst[dnr] = (a[anr] - b[bnr]) * scale; 
+	}
+
+	function vecLengthSquared(a,anr)
+	{
+		anr *= 2;
+		let a0 = a[anr], a1 = a[anr + 1];		
+		return a0 * a0 + a1 * a1 ;
+	}
+
+	function vecDistSquared(a,anr, b,bnr) {
+		anr *= 2; bnr *= 2;
+		let a0 = a[anr] - b[bnr], 
+		a1 = a[anr + 1] - b[bnr + 1];
+		return a0 * a0 + a1 * a1;
+	}	
+
+	function vecDot(a,anr, b,bnr) {
+		anr *= 2; bnr *= 2;
+		return a[anr] * b[bnr] + a[anr + 1] * b[bnr + 1];
+	}	
+
+
+	// ------------------------------------------------------------------
+	class Hash {
+		constructor(spacing, maxNumObjects) 
+		{
+			this.spacing = spacing;
+			this.tableSize = 2 * maxNumObjects;
+			this.cellStart = new Int32Array(this.tableSize + 1);
+			this.cellEntries = new Int32Array(maxNumObjects);
+			this.queryIds = new Int32Array(maxNumObjects);
+			this.querySize = 0;
+		}
+
+		hashCoords(xi, yi) {
+			var h = (xi * 92837111) ^ (yi * 689287499) ;	// fantasy function
+			return Math.abs(h) % this.tableSize; 
+		}
+
+		intCoord(coord) {
+			return Math.floor(coord / this.spacing);
+		}
+
+		hashPos(pos, nr) {
+			return this.hashCoords(
+					this.intCoord(pos[2 * nr]), 
+					this.intCoord(pos[2 * nr + 1]));
+		}
+
+		create(pos) {
+			var numObjects = Math.min(pos.length / 3, this.cellEntries.length);
+
+			// determine cell sizes
+
+			this.cellStart.fill(0);
+			this.cellEntries.fill(0);
+
+			for (var i = 0; i < numObjects; i++) {
+				var h = this.hashPos(pos, i);
+				this.cellStart[h]++;
+			}
+
+			// determine cells starts
+
+			var start = 0;
+			for (var i = 0; i < this.tableSize; i++) {
+				start += this.cellStart[i];
+				this.cellStart[i] = start;
+			}
+			this.cellStart[this.tableSize] = start;	// guard
+
+			// fill in objects ids
+
+			for (var i = 0; i < numObjects; i++) {
+				var h = this.hashPos(pos, i);
+				this.cellStart[h]--;
+				this.cellEntries[this.cellStart[h]] = i;
+			}
+		}
+
+		query(pos, nr, maxDist) 
+		{
+			var i0 = 2*nr;
+			var i1 = i0 + 1;
+			var x0 = this.intCoord(pos[i0] - maxDist);
+			var y0 = this.intCoord(pos[i1] - maxDist); 
+
+			var x1 = this.intCoord(pos[i0] + maxDist);
+			var y1 = this.intCoord(pos[i1] + maxDist); 
+
+			this.querySize = 0;
+
+			for (var xi = x0; xi <= x1; xi++)
+			{
+				for (var yi = y0; yi <= y1; yi++) 
+				{ 
+					var h = this.hashCoords(xi, yi);
+					var start = this.cellStart[h];
+					var end = this.cellStart[h + 1];
+					for (var i = start; i < end; i++) 
+					{
+						this.queryIds[this.querySize] = this.cellEntries[i];
+						this.querySize++;
+					}
+				}
+			}
+		}
+	};
+
+
+	// physics scene -------------------------------------------------------
+
+	class Balls {
+		constructor(radius, mass, pos, vel) {
+			this.radius = radius;
+			this.mass = mass;
+			this.pos = pos; 
+            this.vel = vel; 
+			this.normal = new Float32Array(2);
+			this.numBalls = Math.floor(pos.length/2);
+			this.hash = new Hash(2.0 * radius, this.numBalls); 
+		}
+
+		draw()
+		{
+			for (i = 0; i < this.pos.length/2; i++)
+			{			
+				var i0 = 2*i;
+				var i1 = i0 + 1;
+				var pos_x = this.pos[i0];	
+				var pos_y = this.pos[i1];	
+				c.beginPath();			
+				c.arc(
+					cX(pos_x), cY(pos_y), cScale * this.radius, 0.0, 2.0 * Math.PI); 
+				c.closePath();
+				c.fill();
+			}
+		}
+
+		simulate(dt, gravity, worldSize) 
+		{
+			var minDist = 2.0 * this.radius;
+
+			//integrate 
+			for (var i = 0; i < this.numBalls; i++) 
+			{
+				vecAdd(this.vel, i, gravity, 0, dt);
+				//vecCopy(this.prevPos, i, this.pos, i);
+				vecAdd(this.pos, i, this.vel, i, dt);
+			}
+
+			if(physicsScene.useSpatialHashing)
+				this.hash.create(this.pos);
+
+			// handle collisions
+			for (var i = 0; i < this.numBalls; i++) 
+			{
+				var i0 = 2*i;
+				var i1 = i0 + 1;
+ 
+				// handle wall collisions
+				if (this.pos[i0] < this.radius) 
+				{
+					this.pos[i0] = this.radius;
+					this.vel[i0] = -this.vel[i0];
+				}
+				if (this.pos[i0] > worldSize.x - this.radius) 
+				{
+					this.pos[i0] = worldSize.x - this.radius;
+					this.vel[i0]  = -this.vel[i0];
+				}
+				if (this.pos[i1] < this.radius) 
+				{
+					this.pos[i1] = this.radius;
+					this.vel[i1] = -this.vel[i1];
+				}
+
+				if (this.pos[i1] > worldSize.y - this.radius) 
+				{
+					this.pos[i1] = worldSize.y - this.radius;
+					this.vel[i1] = -this.vel[i1];
+				}
+
+				//  interball collision
+				if(physicsScene.useSpatialHashing)
+				{
+					this.hash.query(this.pos, i, 2.0 * this.radius);
+
+					for (var nr = 0; nr < this.hash.querySize; nr++) 
+					{
+						var j = this.hash.queryIds[nr];
+
+						vecSetDiff(this.normal, 0, this.pos, i, this.pos, j);
+						var d2 = vecLengthSquared(this.normal, 0);
+						
+						// are the balls overlapping?
+						if (d2 > 0.0 && d2 < minDist * minDist)
+						{
+							var d = Math.sqrt(d2);
+							vecScale(this.normal, 0, 1.0 / d);	
+
+							// separate the balls
+							var corr = (minDist - d) * 0.5;
+							vecAdd(this.pos, i, this.normal, 0, corr);
+							vecAdd(this.pos, j, this.normal, 0, -corr);
+
+							// reflect velocities along normal
+							var vi = vecDot(this.vel, i, this.normal, 0);
+							var vj = vecDot(this.vel, j, this.normal, 0);
+							vecAdd(this.vel, i, this.normal, 0, vj - vi);						
+							vecAdd(this.vel, j, this.normal, 0, vi - vj);
+						}
+					}
+				}
+				else
+				{
+					//do n^2 comparisons of balls
+					for (var j = i+1; j < this.numBalls; j++) 
+					{ 
+						vecSetDiff(this.normal, 0, this.pos, i, this.pos, j);
+						var d2 = vecLengthSquared(this.normal, 0);
+						
+						// are the balls overlapping?
+						if (d2 > 0.0 && d2 < minDist * minDist)
+						{
+							var d = Math.sqrt(d2);
+							vecScale(this.normal, 0, 1.0 / d);	
+
+							// separate the balls
+							var corr = (minDist - d) * 0.5;
+							vecAdd(this.pos, i, this.normal, 0, corr);
+							vecAdd(this.pos, j, this.normal, 0, -corr);
+
+							// reflect velocities along normal
+							var vi = vecDot(this.vel, i, this.normal, 0);
+							var vj = vecDot(this.vel, j, this.normal, 0);
+							vecAdd(this.vel, i, this.normal, 0, vj - vi);						
+							vecAdd(this.vel, j, this.normal, 0, vi - vj);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	var physicsScene = 
+	{
+		gravity : [0.0, 0.0],
+		dt : 1.0 / 60.0,
+		worldSize : new Vector2(simWidth, simHeight),
+		paused: true,
+		useSpatialHashing: false,
+		balls: null,				
+		restitution : 1.0 
+	};
+
+	function setupScene() 
+	{
+		physicsScene.balls = [];
+		var numBalls = 10000;
+		var radius = 0.01;
+		var mass = Math.PI * radius * radius;
+		physicsScene.hash = new Hash(2.0 * radius, numBalls);
+
+		var pos = new Float32Array(2 * numBalls);
+		var vel = new Float32Array(2 * numBalls);
+		vel.fill(0.0);
+
+		for (i = 0; i < numBalls; i++) 
+		{
+			var i0 = i*2;
+			var i1 = i0 + 1;
+			pos[i0] = Math.random() * simWidth;
+			pos[i1] = Math.random() * simHeight;
+
+			vel[i0] = -1.0 + 2.0 * Math.random() ;
+			vel[i1] = -1.0 + 2.0 * Math.random() ; 
+		}
+
+		physicsScene.balls = new Balls(radius, mass, pos, vel);
+
+		stats1 = Stats();
+        stats2 = Stats(); 
+
+		stats1.showPanel(0);
+        stats2.showPanel(1); 
+
+		stats1.domElement.style.cssText = 'opacity:0.75;position:absolute;top:42px;left:8px;';
+        stats2.domElement.style.cssText = 'opacity:0.75;position:absolute;top:90px;left:8px;'; 
+        document.body.appendChild(stats1.dom);
+        document.body.appendChild(stats2.dom); 
+	}
+
+	// draw -------------------------------------------------------
+
+	function draw() 
+	{
+		c.clearRect(0, 0, canvas.width, canvas.height);
+
+		c.fillStyle = "#FF0000";
+ 
+		physicsScene.balls.draw();
+	}
+
+	// collision handling -------------------------------------------------------
+
+	function handleBallCollision(ball1, ball2, restitution) 
+	{
+		var dir = new Vector2();
+		dir.subtractVectors(ball2.pos, ball1.pos);
+		var d = dir.length();
+		if (d == 0.0 || d > ball1.radius + ball2.radius)
+			return;
+
+		dir.scale(1.0 / d);
+
+		var corr = (ball1.radius + ball2.radius - d) / 2.0;
+		ball1.pos.add(dir, -corr);
+		ball2.pos.add(dir, corr);
+
+		var v1 = ball1.vel.dot(dir);
+		var v2 = ball2.vel.dot(dir);
+
+		var m1 = ball1.mass;
+		var m2 = ball2.mass;
+
+		var newV1 = (m1 * v1 + m2 * v2 - m2 * (v1 - v2) * restitution) / (m1 + m2);
+		var newV2 = (m1 * v1 + m2 * v2 - m1 * (v2 - v1) * restitution) / (m1 + m2);
+
+		ball1.vel.add(dir, newV1 - v1);
+		ball2.vel.add(dir, newV2 - v2);
+	}
+ 
+
+	// simulation -------------------------------------------------------
+
+	function simulate() 
+	{
+		 
+		/*for (i = 0; i < physicsScene.balls.length; i++) {
+			var ball1 = physicsScene.balls[i];
+			ball1.simulate(physicsScene.dt, physicsScene.gravity);
+
+			for (j = i + 1; j < physicsScene.balls.length; j++) {
+				var ball2 = physicsScene.balls[j];
+				handleBallCollision(ball1, ball2, physicsScene.restitution);
+			}
+
+			handleWallCollision(ball1, physicsScene.worldSize);
+		}*/
+		physicsScene.balls.simulate(physicsScene.dt, physicsScene.gravity, physicsScene.worldSize);		
+	}
+
+	function update() {
+		simulate();
+		draw();
+		requestAnimationFrame(update);
+		stats1.update();
+        stats2.update(); 
+	}
+	
+	setupScene();
+	update();
+
+	document.getElementById("restitutionSlider").oninput = function() {
+		physicsScene.restitution = this.value / 10.0;
+	}
+	
+</script> 
+</body>
+</html>
